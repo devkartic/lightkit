@@ -1,439 +1,395 @@
 <?php
+
 declare(strict_types=1);
 
 namespace DevKartic\LightKit\Database;
 
+use InvalidArgumentException;
 use PDO;
 use PDOStatement;
-use InvalidArgumentException;
 
 /**
  * Lightweight, framework-agnostic QueryBuilder for PDO.
  *
- * Usage:
- *  $qb = new QueryBuilder($pdo);
- *  $users = $qb->table('users')
- *              ->select('id', 'name')
- *              ->where('status', 'active')
- *              ->orderBy('id', 'DESC')
- *              ->limit(10)
- *              ->get();
- *
- *  $id = $qb->table('users')->insert(['name' => 'John', 'email' => 'j@e.com']);
- *
- *  $affected = $qb->table('users')->where('id', $id)->update(['name' => 'Jane']);
- *
- *  $deleted = $qb->table('users')->where('id', $id)->delete();
+ * Features:
+ *  - Fluent API for SELECT/INSERT/UPDATE/DELETE
+ *  - Safe parameter binding (prevents SQL injection)
+ *  - Supports WHERE, JOINs, GROUP BY, HAVING, ORDER, LIMIT, OFFSET
+ *  - Debugging helpers (toSql, toRawSql)
+ *  - Prevents accidental UPDATE/DELETE without WHERE
  */
 final class QueryBuilder
 {
     private PDO $pdo;
-
-    // Core state
-    private ?string $table = null;
+    private string $table = '';
     private array $columns = ['*'];
-    private array $wheres = [];           // [[boolean, sql, bindings], ...]
-    private array $joins = [];            // [[type, table, first, operator, second], ...]
+    private array $wheres = [];
+    private array $bindings = [];
+    private array $joins = [];
+    private array $orders = [];
     private array $groupBys = [];
-    private array $havings = [];          // [[boolean, sql, bindings], ...]
-    private array $orders = [];           // [[column, direction], ...]
+    private array $havings = [];
     private ?int $limit = null;
     private ?int $offset = null;
-
-    // Misc
-    private array $bindings = [];
 
     public function __construct(PDO $pdo)
     {
         $this->pdo = $pdo;
-        $this->pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
     }
 
-
     /**
-     * Factory: create a QueryBuilder from EnvManager instance.
+     * Create instance from EnvManager.
      */
-    public static function fromEnv($env): self
+    public static function fromEnv(\DevKartic\LightKit\Env\EnvManager $env): self
     {
-        $pdo = Connection::fromEnv($env);
-        return new self($pdo);
+        return new self(Connection::fromEnv($env));
     }
 
-
     /**
-     * Factory: create a QueryBuilder from config array.
+     * Create instance from config array.
      */
     public static function fromConfig(array $config): self
     {
-        $pdo = Connection::make($config);
-        return new self($pdo);
+        return new self(Connection::make($config));
     }
 
     /**
-     * Start a new query targeting a specific table.
+     * Set the working table.
      */
     public function table(string $table): self
     {
-        $this->reset();
         $this->table = $table;
         return $this;
     }
 
-    /** Select columns (defaults to *). */
+    /**
+     * Set selected columns.
+     */
     public function select(string ...$columns): self
     {
-        if ($columns) {
-            $this->columns = $columns;
-        }
+        $this->columns = $columns ?: ['*'];
         return $this;
     }
 
-    /** Raw select expression helper (e.g. selectRaw('COUNT(*) AS cnt')). */
+    /**
+     * Add raw select expression (e.g. COUNT(*)).
+     */
     public function selectRaw(string $expression): self
     {
-        if ($this->columns === ['*']) {
-            $this->columns = [];
-        }
         $this->columns[] = $expression;
         return $this;
     }
 
     /**
-     * Add a WHERE clause. Supports where('col', 'op', value) and where('col', value).
+     * Add a WHERE condition.
      */
-    public function where(string $column, $operatorOrValue, $value = null, string $boolean = 'AND'): self
+    public function where(string $column, string $operator, mixed $value = null): self
+    {
+        // Support shorthand ->where('id', 1)
+        if ($value === null) {
+            $value = $operator;
+            $operator = '=';
+        }
+
+        $placeholder = '?';
+        $this->bindings[] = $value;
+        $this->wheres[] = "{$this->wrap($column)} {$operator} {$placeholder}";
+
+        return $this;
+    }
+
+    /**
+     * Add an OR WHERE condition.
+     */
+    public function orWhere(string $column, string $operator, mixed $value = null): self
     {
         if ($value === null) {
+            $value = $operator;
             $operator = '=';
-            $val = $operatorOrValue;
-        } else {
-            $operator = (string)$operatorOrValue;
-            $val = $value;
         }
 
-        $this->wheres[] = [strtoupper($boolean), sprintf('%s %s ?', $this->wrap($column), $operator), [$val]];
+        $placeholder = '?';
+        $this->bindings[] = $value;
+        $this->wheres[] = "OR {$this->wrap($column)} {$operator} {$placeholder}";
+
         return $this;
     }
 
-    public function orWhere(string $column, $operatorOrValue, $value = null): self
+    /**
+     * WHERE IN condition.
+     */
+    public function whereIn(string $column, array $values): self
     {
-        return $this->where($column, $operatorOrValue, $value, 'OR');
-    }
-
-    public function whereNull(string $column, string $boolean = 'AND', bool $not = false): self
-    {
-        $this->wheres[] = [strtoupper($boolean), sprintf('%s IS %sNULL', $this->wrap($column), $not ? 'NOT ' : ''), []];
-        return $this;
-    }
-
-    public function whereNotNull(string $column, string $boolean = 'AND'): self
-    {
-        return $this->whereNull($column, $boolean, true);
-    }
-
-    public function whereIn(string $column, array $values, string $boolean = 'AND', bool $not = false): self
-    {
-        if (empty($values)) {
-            // Empty IN should never match; use a safe shortcut
-            $this->wheres[] = [strtoupper($boolean), $not ? '1=1' : '1=0', []];
-            return $this;
-        }
         $placeholders = implode(',', array_fill(0, count($values), '?'));
-        $this->wheres[] = [strtoupper($boolean), sprintf('%s %sIN (%s)', $this->wrap($column), $not ? 'NOT ' : '', $placeholders), array_values($values)];
+        $this->bindings = array_merge($this->bindings, $values);
+        $this->wheres[] = "{$this->wrap($column)} IN ({$placeholders})";
+
         return $this;
     }
 
-    public function whereNotIn(string $column, array $values, string $boolean = 'AND'): self
+    /**
+     * WHERE NULL condition.
+     */
+    public function whereNull(string $column): self
     {
-        return $this->whereIn($column, $values, $boolean, true);
-    }
-
-    public function whereBetween(string $column, $from, $to, string $boolean = 'AND', bool $not = false): self
-    {
-        $this->wheres[] = [strtoupper($boolean), sprintf('%s %sBETWEEN ? AND ?', $this->wrap($column), $not ? 'NOT ' : ''), [$from, $to]];
+        $this->wheres[] = "{$this->wrap($column)} IS NULL";
         return $this;
     }
 
-    public function orWhereBetween(string $column, $from, $to): self
+    /**
+     * WHERE NOT NULL condition.
+     */
+    public function whereNotNull(string $column): self
     {
-        return $this->whereBetween($column, $from, $to, 'OR');
+        $this->wheres[] = "{$this->wrap($column)} IS NOT NULL";
+        return $this;
     }
 
-    /** JOIN helpers */
+    /**
+     * WHERE BETWEEN condition.
+     */
+    public function whereBetween(string $column, mixed $start, mixed $end): self
+    {
+        $this->wheres[] = "{$this->wrap($column)} BETWEEN ? AND ?";
+        $this->bindings[] = $start;
+        $this->bindings[] = $end;
+
+        return $this;
+    }
+
+    /**
+     * Add a JOIN clause.
+     */
     public function join(string $table, string $first, string $operator, string $second, string $type = 'INNER'): self
     {
-        $this->joins[] = [strtoupper($type), $table, $first, $operator, $second];
+        $this->joins[] = "{$type} JOIN {$table} ON {$this->wrap($first)} {$operator} {$this->wrap($second)}";
         return $this;
     }
 
-    public function leftJoin(string $table, string $first, string $operator, string $second): self
+    /**
+     * Add an ORDER BY clause.
+     */
+    public function orderBy(string $column, string $direction = 'ASC'): self
     {
-        return $this->join($table, $first, $operator, $second, 'LEFT');
+        $this->orders[] = "{$this->wrap($column)} {$direction}";
+        return $this;
     }
 
-    public function rightJoin(string $table, string $first, string $operator, string $second): self
-    {
-        return $this->join($table, $first, $operator, $second, 'RIGHT');
-    }
-
-    /** GROUP BY / HAVING */
+    /**
+     * Add a GROUP BY clause.
+     */
     public function groupBy(string ...$columns): self
     {
-        foreach ($columns as $c) {
-            $this->groupBys[] = $this->wrap($c);
+        foreach ($columns as $col) {
+            $this->groupBys[] = $this->wrap($col);
         }
         return $this;
     }
 
-    public function having(string $column, string $operator, $value, string $boolean = 'AND'): self
+    /**
+     * Add a HAVING clause.
+     */
+    public function having(string $column, string $operator, mixed $value): self
     {
-        $this->havings[] = [strtoupper($boolean), sprintf('%s %s ?', $this->wrap($column), $operator), [$value]];
+        $this->havings[] = "{$this->wrap($column)} {$operator} ?";
+        $this->bindings[] = $value;
         return $this;
     }
 
-    public function orHaving(string $column, string $operator, $value): self
-    {
-        return $this->having($column, $operator, $value, 'OR');
-    }
-
-    /** ORDER / LIMIT */
-    public function orderBy(string $column, string $direction = 'ASC'): self
-    {
-        $dir = strtoupper($direction) === 'DESC' ? 'DESC' : 'ASC';
-        $this->orders[] = [$this->wrap($column), $dir];
-        return $this;
-    }
-
+    /**
+     * Limit the number of results.
+     */
     public function limit(int $limit): self
     {
-        if ($limit < 0) throw new InvalidArgumentException('Limit must be >= 0');
         $this->limit = $limit;
         return $this;
     }
 
+    /**
+     * Offset the results.
+     */
     public function offset(int $offset): self
     {
-        if ($offset < 0) throw new InvalidArgumentException('Offset must be >= 0');
         $this->offset = $offset;
         return $this;
     }
 
-    /** Execute SELECT and return all rows as associative arrays. */
+    /**
+     * Get all results.
+     */
     public function get(): array
     {
-        [$sql, $bindings] = $this->compileSelect();
+        [$sql, $bindings] = $this->toSql();
         $stmt = $this->execute($sql, $bindings);
-        $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
-        $this->resetAfterRun();
-        return $rows;
+        $results = $stmt->fetchAll();
+        $this->reset();
+        return $results;
     }
 
-    /** Return first row or null. */
+    /**
+     * Get the first result.
+     */
     public function first(): ?array
     {
-        $this->limit = $this->limit ?? 1;
-        $rows = $this->get();
-        return $rows[0] ?? null;
+        $this->limit(1);
+        $results = $this->get();
+        return $results[0] ?? null;
     }
 
-    /** Return COUNT(*) for current query (ignores selected columns). */
-    public function count(): int
+    /**
+     * Insert a new record.
+     */
+    public function insert(array $data): bool
     {
-        $originalColumns = $this->columns;
-        $this->columns = ['COUNT(*) AS aggregate'];
-        $row = $this->first();
-        $this->columns = $originalColumns;
-        return (int)($row['aggregate'] ?? 0);
-    }
-
-    /** Insert a row; returns lastInsertId (string, as per PDO). */
-    public function insert(array $data): string
-    {
-        if (!$this->table) throw new InvalidArgumentException('No table selected for insert');
-        if (empty($data)) throw new InvalidArgumentException('Insert data cannot be empty');
-
-        $columns = array_keys($data);
-        $placeholders = implode(', ', array_fill(0, count($columns), '?'));
-        $colSql = implode(', ', array_map([$this, 'wrap'], $columns));
-
-        $sql = sprintf('INSERT INTO %s (%s) VALUES (%s)', $this->wrap($this->table), $colSql, $placeholders);
-        $this->execute($sql, array_values($data));
-        $this->resetAfterRun();
-        return $this->pdo->lastInsertId();
-    }
-
-    /** Update rows matching current WHERE; returns affected row count. */
-    public function update(array $data): int
-    {
-        if (!$this->table) throw new InvalidArgumentException('No table selected for update');
-        if (empty($data)) throw new InvalidArgumentException('Update data cannot be empty');
-
-        [$whereSql, $whereBindings] = $this->compileWhere();
-
-        $sets = [];
-        $bindings = [];
-        foreach ($data as $col => $val) {
-            $sets[] = sprintf('%s = ?', $this->wrap((string)$col));
-            $bindings[] = $val;
+        if (empty($data)) {
+            throw new InvalidArgumentException('Insert data cannot be empty');
         }
-        $sql = sprintf('UPDATE %s SET %s%s', $this->wrap($this->table), implode(', ', $sets), $whereSql);
 
-        $stmt = $this->execute($sql, array_merge($bindings, $whereBindings));
-        $count = $stmt->rowCount();
-        $this->resetAfterRun();
-        return $count;
+        $columns = implode(', ', array_map([$this, 'wrap'], array_keys($data)));
+        $placeholders = implode(', ', array_fill(0, count($data), '?'));
+
+        $sql = "INSERT INTO {$this->table} ({$columns}) VALUES ({$placeholders})";
+        $stmt = $this->execute($sql, array_values($data));
+
+        $this->reset();
+        return $stmt->rowCount() > 0;
     }
 
-    /** Delete rows matching current WHERE; returns affected row count. */
-    public function delete(): int
+    /**
+     * Update existing records.
+     */
+    public function update(array $data): bool
     {
-        if (!$this->table) throw new InvalidArgumentException('No table selected for delete');
-        [$whereSql, $whereBindings] = $this->compileWhere();
+        if (empty($data)) {
+            throw new InvalidArgumentException('Update data cannot be empty');
+        }
+        if (empty($this->wheres)) {
+            throw new InvalidArgumentException('UPDATE without WHERE is not allowed');
+        }
 
-        $sql = sprintf('DELETE FROM %s%s', $this->wrap($this->table), $whereSql);
-        $stmt = $this->execute($sql, $whereBindings);
-        $count = $stmt->rowCount();
-        $this->resetAfterRun();
-        return $count;
+        $set = implode(', ', array_map(fn($col) => "{$this->wrap($col)} = ?", array_keys($data)));
+
+        $sql = "UPDATE {$this->table} SET {$set} " . $this->compileWheres();
+        $bindings = array_merge(array_values($data), $this->bindings);
+
+        $stmt = $this->execute($sql, $bindings);
+        $this->reset();
+
+        return $stmt->rowCount() > 0;
     }
 
-    /** Build the SQL without executing, returns [sql, bindings]. */
+    /**
+     * Delete records.
+     */
+    public function delete(): bool
+    {
+        if (empty($this->wheres)) {
+            throw new InvalidArgumentException('DELETE without WHERE is not allowed');
+        }
+
+        $sql = "DELETE FROM {$this->table} " . $this->compileWheres();
+        $stmt = $this->execute($sql, $this->bindings);
+
+        $this->reset();
+        return $stmt->rowCount() > 0;
+    }
+
+    /**
+     * Compile the current query to SQL with bindings.
+     */
     public function toSql(): array
     {
-        return $this->compileSelect();
-    }
+        $sql = "SELECT " . implode(', ', array_map([$this, 'wrap'], $this->columns))
+            . " FROM {$this->table}";
 
-    /** ---------------------------------- */
-    /** Internals                          */
-    /** ---------------------------------- */
-
-    private function compileSelect(): array
-    {
-        if (!$this->table) throw new InvalidArgumentException('No table selected for select');
-
-        $sql = 'SELECT ' . ($this->columns ? implode(', ', array_map(fn($c) => $this->isExpression($c) ? $c : $this->wrap($c), $this->columns)) : '*');
-        $sql .= ' FROM ' . $this->wrap($this->table);
-
-        // Joins
-        foreach ($this->joins as [$type, $table, $first, $operator, $second]) {
-            $sql .= sprintf(' %s JOIN %s ON %s %s %s', $type, $this->wrap($table), $this->wrap($first), $operator, $this->wrap($second));
+        if ($this->joins) {
+            $sql .= ' ' . implode(' ', $this->joins);
         }
-
-        // Where
-        [$whereSql, $whereBindings] = $this->compileWhere();
-        $sql .= $whereSql;
-
-        // Group By / Having
+        if ($this->wheres) {
+            $sql .= ' ' . $this->compileWheres();
+        }
         if ($this->groupBys) {
             $sql .= ' GROUP BY ' . implode(', ', $this->groupBys);
         }
         if ($this->havings) {
-            $sql .= ' HAVING ' . $this->compileBooleanChain($this->havings, $havingBindings);
-        } else {
-            $havingBindings = [];
+            $sql .= ' HAVING ' . implode(' AND ', $this->havings);
         }
-
-        // Order / Limit
         if ($this->orders) {
-            $pieces = array_map(fn($o) => $o[0] . ' ' . $o[1], $this->orders);
-            $sql .= ' ORDER BY ' . implode(', ', $pieces);
+            $sql .= ' ORDER BY ' . implode(', ', $this->orders);
         }
         if ($this->limit !== null) {
-            $sql .= ' LIMIT ' . (int)$this->limit;
+            $sql .= ' LIMIT ' . $this->limit;
         }
         if ($this->offset !== null) {
-            $sql .= ' OFFSET ' . (int)$this->offset;
+            $sql .= ' OFFSET ' . $this->offset;
         }
 
-        $bindings = array_merge($whereBindings, $havingBindings ?? []);
-        return [$sql, $bindings];
-    }
-
-    private function compileWhere(): array
-    {
-        if (empty($this->wheres)) {
-            return ['', []];
-        }
-        $sql = ' WHERE ' . $this->compileBooleanChain($this->wheres, $bindings);
-        return [$sql, $bindings];
+        return [$sql, $this->bindings];
     }
 
     /**
-     * Build boolean chains like: expr1 AND expr2 OR expr3
-     * Also collects bindings.
+     * Get SQL with bound values interpolated (for debugging).
      */
-    private function compileBooleanChain(array $parts, ?array &$outBindings = null): string
+    public function toRawSql(): string
     {
-        $sql = '';
-        $bindings = [];
-        foreach ($parts as $i => [$bool, $expr, $binds]) {
-            $prefix = ($i === 0) ? '' : ' ' . $bool . ' ';
-            $sql .= $prefix . $expr;
-            foreach ($binds as $b) { $bindings[] = $b; }
-        }
-        if ($outBindings !== null) {
-            $outBindings = $bindings;
+        [$sql, $bindings] = $this->toSql();
+        foreach ($bindings as $binding) {
+            $binding = $this->pdo->quote((string)$binding);
+            $sql = preg_replace('/\?/', $binding, $sql, 1);
         }
         return $sql;
     }
 
-    /** Execute a prepared statement */
+    /**
+     * Execute a raw query.
+     */
+    public function raw(string $sql, array $bindings = []): PDOStatement
+    {
+        return $this->execute($sql, $bindings);
+    }
+
+    private function compileWheres(): string
+    {
+        if (!$this->wheres) return '';
+        $sql = 'WHERE ' . preg_replace('/^OR /', '', implode(' ', $this->wheres));
+        return $sql;
+    }
+
     private function execute(string $sql, array $bindings): PDOStatement
     {
         $stmt = $this->pdo->prepare($sql);
-        foreach (array_values($bindings) as $i => $value) {
-            // PDO placeholders are 1-indexed
-            $stmt->bindValue($i + 1, $value);
-        }
-        $stmt->execute();
+        $stmt->execute($bindings);
         return $stmt;
     }
 
-    /** Reset all query state except the PDO connection. */
-    private function reset(): void
+    private function wrap(string $value): string
     {
-        $this->table = null;
-        $this->columns = ['*'];
-        $this->wheres = [];
-        $this->joins = [];
-        $this->groupBys = [];
-        $this->havings = [];
-        $this->orders = [];
-        $this->limit = null;
-        $this->offset = null;
-        $this->bindings = [];
-    }
-
-    /** Reset state after a run to avoid leaking conditions into the next query. */
-    private function resetAfterRun(): void
-    {
-        $this->columns = ['*'];
-        $this->wheres = [];
-        $this->joins = [];
-        $this->groupBys = [];
-        $this->havings = [];
-        $this->orders = [];
-        $this->limit = null;
-        $this->offset = null;
-        $this->bindings = [];
-        // keep $this->table so builder can be reused for the same table conveniently
-    }
-
-    /** Wrap identifiers with backticks, supporting dotted identifiers table.column */
-    private function wrap(string $identifier): string
-    {
-        // If it looks like a raw expression, leave it.
-        if ($this->isExpression($identifier)) {
-            return $identifier;
+        if ($this->isExpression($value)) {
+            return $value;
         }
-        $segments = explode('.', $identifier);
-        $segments = array_map(fn($s) => $s === '*' ? '*' : '`' . str_replace('`', '``', $s) . '`', $segments);
-        return implode('.', $segments);
+        return "`{$value}`";
     }
 
     private function isExpression(string $value): bool
     {
-        // Consider anything containing parentheses or spaces or operators as raw (best-effort)
-        return (bool)preg_match('/[\(\)\s+\-\/*]/', $value);
+        // crude check for SQL functions/operators
+        return (bool)preg_match('/\s|\(|\)|\*|,/', $value);
+    }
+
+    /**
+     * Reset builder state after query.
+     */
+    private function reset(): void
+    {
+        $this->columns = ['*'];
+        $this->wheres = [];
+        $this->bindings = [];
+        $this->joins = [];
+        $this->orders = [];
+        $this->groupBys = [];
+        $this->havings = [];
+        $this->limit = null;
+        $this->offset = null;
+        // keep $this->table persistent for reuse
     }
 }
