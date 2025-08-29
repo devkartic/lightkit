@@ -1,0 +1,11 @@
+{
+    "name": "devkartic/lightkit",
+    "autoload": {
+        "psr-4": {
+            "DevKartic\\LightKit\\": "src/"
+        }
+    },
+    "require": {
+        "ext-pdo": "*"
+    }
+}
