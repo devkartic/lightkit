@@ -11,14 +11,11 @@ require __DIR__ . '/vendor/autoload.php';
 //var_dump($env::get('DB_USER'));
 
 
-use DevKartic\LightKit\Env\EnvManager;
+use DevKartic\LightKit\Config\ConfigManager;
 use DevKartic\LightKit\Database\DB;
 
 
-$env = new EnvManager();
-$env->load(__DIR__.'/.env');
-
-DB::fromEnv($env); // Initializes QueryBuilder via Connection::fromEnv
+ ConfigManager::init();
 
 // Now you can run queries
 $users = DB::table('users')->where('id', 1)->get();
