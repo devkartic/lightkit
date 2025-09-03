@@ -11,24 +11,16 @@ class ConfigManager
     private static bool $initialized = false;
     private static ?EnvManager $env = null;
 
-    /**
-     * Initialize the application environment & DB connection
-     */
-    public static function init(): void
+    public static function init(?string $envPath = null): void
     {
         if (self::$initialized) {
-            return; // prevent double initialization
-        }
-
-        // Load Composer autoload (resolve dynamically)
-        $autoload = __DIR__ . '/../../vendor/autoload.php';
-        if (file_exists($autoload)) {
-            require_once $autoload;
+            return;
         }
 
         // Load environment variables
         self::$env = new EnvManager();
-        self::$env->load(__DIR__ . '/../../.env');
+        $envFile = $envPath ?? dirname(__DIR__, 2) . '/.env';
+        self::$env->load($envFile);
 
         // Initialize DB facade
         DB::fromEnv(self::$env);
@@ -36,9 +28,6 @@ class ConfigManager
         self::$initialized = true;
     }
 
-    /**
-     * Get Env Manager instance
-     */
     public static function env(): EnvManager
     {
         if (!self::$initialized) {
