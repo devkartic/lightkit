@@ -20,4 +20,5 @@ use DevKartic\LightKit\Database\DB;
 // Now you can run queries
 $users = DB::table('users')->where('id', 1)->get();
 
+echo '<pre>';
 var_dump($users);
