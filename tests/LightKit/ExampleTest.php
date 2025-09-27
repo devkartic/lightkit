@@ -1,6 +1,6 @@
 <?php
 
-namespace Tests\Unit;
+namespace Tests\LightKit;
 
 test('example', function () {
     expect(true)->toBeTrue();

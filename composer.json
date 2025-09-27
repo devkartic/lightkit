@@ -2,10 +2,19 @@
     "name": "devkartic/lightkit",
     "autoload": {
         "psr-4": {
-            "DevKartic\\LightKit\\": "src/"
+            "DevKartic\\LightKit\\": "src/",
+            "Tests\\": "tests/"
         }
     },
     "require": {
         "ext-pdo": "*"
+    },
+    "config": {
+        "allow-plugins": {
+            "pestphp/pest-plugin": true
+        }
+    },
+    "require-dev": {
+        "pestphp/pest": "^4.1"
     }
 }
