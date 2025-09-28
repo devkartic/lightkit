@@ -1,24 +1,34 @@
 <?php
 
 namespace Tests\LightKit;
+use DevKartic\LightKit\Database\Connection;
 use DevKartic\LightKit\Database\QueryBuilder;
 use PDO;
 use InvalidArgumentException;
 
-beforeEach(function () {
-    // Create in-memory DB and table
-    $this->pdo = new PDO('sqlite::memory:');
-    $this->pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
 
+beforeEach(function () {
+    // Real MySQL connection
+    $this->pdo = Connection::make([
+        'driver'   => 'mysql',
+        'host'     => '127.0.0.1',      // Use TCP
+        'database' => 'lightkit',        // A dedicated test database
+        'username' => 'root',
+        'password' => '',
+        'charset'  => 'utf8mb4',
+    ]);
+
+    // Recreate a clean table for each test
+    $this->pdo->exec("DROP TABLE IF EXISTS users");
     $this->pdo->exec("
         CREATE TABLE users (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL,
-            age INTEGER
-        )
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            name VARCHAR(100) NOT NULL,
+            age INT
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     ");
 
-    // Seed some data
+    // Seed test data
     $stmt = $this->pdo->prepare("INSERT INTO users (name, age) VALUES (?, ?)");
     $stmt->execute(['Alice', 25]);
     $stmt->execute(['Bob', 30]);
@@ -27,11 +37,12 @@ beforeEach(function () {
     $this->qb = new QueryBuilder($this->pdo);
 });
 
+
 it('can select all records', function () {
     $rows = $this->qb->table('users')->get();
 
-    expect($rows)->toHaveCount(3);
-    expect($rows[0])->toHaveKeys(['id', 'name', 'age']);
+    expect($rows)->toHaveCount(3)
+        ->and($rows[0])->toHaveKeys(['id', 'name', 'age']);
 });
 
 it('can filter with where condition', function () {
